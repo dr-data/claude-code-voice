@@ -17,5 +17,5 @@ After setup, restart Claude Code. `/voice` (spacebar push-to-talk) transcribes H
 ## Uninstall
 
 ```bash
-~/.local/share/hebrew-voice/uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/eladcandroid/claude-code-hebrew-voice/main/uninstall.sh | bash
 ```

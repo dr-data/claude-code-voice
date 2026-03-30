@@ -48,7 +48,7 @@ After install, restart Claude Code:
 ## Uninstall
 
 ```bash
-~/.local/share/hebrew-voice/uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/eladcandroid/claude-code-hebrew-voice/main/uninstall.sh | bash
 ```
 
 Or if cloned locally:
