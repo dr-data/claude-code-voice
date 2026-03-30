@@ -6,10 +6,10 @@ Adds Hebrew to Claude Code's `/voice` command using Apple's native on-device `SF
 
 Claude Code's voice streams audio via WebSocket. The `VOICE_STREAM_BASE_URL` env var redirects it to a local server (`localhost:19876`) that transcribes Hebrew via Apple's `SFSpeechRecognizer` instead of Anthropic's server.
 
-## Usage
+## Install
 
 ```bash
-./setup.sh   # One-time: builds STT app, installs service, configures settings
+curl -fsSL https://raw.githubusercontent.com/eladcandroid/claude-code-hebrew-voice/main/setup.sh | bash
 ```
 
 After setup, restart Claude Code. `/voice` (spacebar push-to-talk) transcribes Hebrew.
@@ -17,7 +17,5 @@ After setup, restart Claude Code. `/voice` (spacebar push-to-talk) transcribes H
 ## Uninstall
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.hebrew-voice.server.plist
-rm ~/Library/LaunchAgents/com.hebrew-voice.server.plist
-# Remove VOICE_STREAM_BASE_URL from ~/.claude/settings.json
+~/.local/share/hebrew-voice/uninstall.sh
 ```
