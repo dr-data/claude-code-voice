@@ -8,29 +8,9 @@ Adds Hebrew speech-to-text to Claude Code's `/voice` command using Apple's nativ
 curl -fsSL https://raw.githubusercontent.com/eladcandroid/claude-code-hebrew-voice/main/setup.sh | bash
 ```
 
-Or clone and run:
-
-```bash
-git clone https://github.com/eladcandroid/claude-code-hebrew-voice.git
-cd claude-code-hebrew-voice
-./setup.sh
-```
-
-## How it works
-
-Claude Code has an undocumented `VOICE_STREAM_BASE_URL` env var that redirects its voice WebSocket to a custom server. This project runs a local server on `localhost:19876` that receives Claude Code's audio stream and transcribes it using Apple's `SFSpeechRecognizer` for Hebrew.
-
-```
-┌─────────────┐    audio    ┌──────────────┐   WAV file   ┌─────────────────┐
-│ Claude Code  │───chunks──▶│ voice-server │────────────▶│ Transcribe.app  │
-│ /voice + ␣   │◀──text────│ (localhost)   │◀───text────│ (Apple STT)     │
-└─────────────┘             └──────────────┘              └─────────────────┘
-```
-
 ## Requirements
 
 - macOS (Apple Silicon or Intel)
-- [Bun](https://bun.sh) runtime (`brew install bun`)
 - Xcode Command Line Tools (`xcode-select --install`)
 - Claude Code with `/voice` support
 
@@ -45,28 +25,30 @@ After install, restart Claude Code:
 
 > **First run:** macOS will prompt for Speech Recognition permission — click **Allow**.
 
+## How it works
+
+Claude Code has an undocumented `VOICE_STREAM_BASE_URL` env var that redirects its voice WebSocket. This project runs a native macOS app on `localhost:19876` that receives the audio stream and transcribes it using Apple's on-device `SFSpeechRecognizer` for Hebrew.
+
+```
+┌─────────────┐    audio    ┌───────────────────────────────┐
+│ Claude Code  │───chunks──▶│ HebrewVoice.app               │
+│ /voice + ␣   │◀──text────│ WebSocket server + Apple STT  │
+└─────────────┘             └───────────────────────────────┘
+```
+
+Everything is a single Swift binary — WebSocket server and speech recognition combined. No external runtimes needed.
+
 ## Uninstall
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eladcandroid/claude-code-hebrew-voice/main/uninstall.sh | bash
 ```
 
-Or if cloned locally:
-
-```bash
-./uninstall.sh
-```
-
 ## Project structure
 
 ```
-├── setup.sh                    # One-command install
-├── uninstall.sh                # Full uninstall
-├── scripts/
-│   ├── voice-server.js         # Local WebSocket voice server (Bun)
-│   ├── transcribe.swift        # Apple SFSpeechRecognizer wrapper
-│   ├── entitlements.plist      # macOS entitlements for audio access
-│   └── Transcribe.app/         # Signed app bundle (built by setup.sh)
-├── CLAUDE.md
-└── README.md
+├── setup.sh              # One-command install
+├── uninstall.sh           # Full uninstall
+└── scripts/
+    └── server.swift       # WebSocket server + Apple STT (single file)
 ```
