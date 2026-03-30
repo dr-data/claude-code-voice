@@ -1,6 +1,6 @@
 // Voice server for Claude Code (macOS).
-// WebSocket server + Apple SFSpeechRecognizer in a single binary.
-// Reads language from ~/.claude/settings.json — switch via /config.
+// Native languages → proxy to Anthropic's server.
+// Unsupported languages (Hebrew, etc.) → Apple SFSpeechRecognizer on-device.
 
 import Foundation
 import Network
@@ -8,6 +8,8 @@ import Speech
 import AppKit
 
 let PORT: UInt16 = 19876
+let ANTHROPIC_WS = "wss://api.anthropic.com/api/ws/speech_to_text/voice_stream"
+let NATIVE_LANGS: Set<String> = ["en","es","fr","ja","de","pt","it","ko","hi","id","ru","pl","tr","nl","uk","el","cs","da","sv","no"]
 
 // MARK: - Language
 
@@ -37,16 +39,49 @@ let localeMap: [String: String] = [
     "no": "nb-NO", "norwegian": "nb-NO",
 ]
 
-func currentLocale() -> String {
+func readLanguage() -> String {
     let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json")
     guard let data = try? Data(contentsOf: path),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let lang = json["language"] as? String else { return "en-US" }
-    let key = lang.lowercased().trimmingCharacters(in: .whitespaces)
-    return localeMap[key] ?? (key.contains("-") ? key : "en-US")
+          let lang = json["language"] as? String else { return "en" }
+    return lang.lowercased().trimmingCharacters(in: .whitespaces)
 }
 
-// MARK: - WAV
+func langCode(_ raw: String) -> String {
+    if NATIVE_LANGS.contains(raw) { return raw }
+    if let mapped = localeMap[raw] { return String(mapped.prefix(2)) }
+    return raw
+}
+
+func appleLocale(_ raw: String) -> String {
+    return localeMap[raw] ?? localeMap[langCode(raw)] ?? "en-US"
+}
+
+func isNativeLanguage(_ raw: String) -> Bool {
+    return NATIVE_LANGS.contains(langCode(raw))
+}
+
+// MARK: - OAuth token
+
+func readOAuthToken() -> String? {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    proc.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+    let pipe = Pipe()
+    proc.standardOutput = pipe
+    proc.standardError = FileHandle.nullDevice
+    try? proc.run()
+    proc.waitUntilExit()
+    guard proc.terminationStatus == 0 else { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    guard let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+          let json = try? JSONSerialization.jsonObject(with: Data(str.utf8)) as? [String: Any],
+          let oauth = json["claudeAiOauth"] as? [String: Any],
+          let token = oauth["accessToken"] as? String else { return nil }
+    return token
+}
+
+// MARK: - WAV + Apple STT
 
 func createWav(_ pcm: Data) -> Data {
     var w = Data(count: 44)
@@ -64,50 +99,33 @@ func createWav(_ pcm: Data) -> Data {
     return w
 }
 
-// MARK: - Speech recognition
-
-func transcribe(_ pcm: Data, completion: @escaping (String) -> Void) {
+func transcribeApple(_ pcm: Data, locale: String, completion: @escaping (String) -> Void) {
     guard !pcm.isEmpty else { return completion("") }
-
-    let locale = currentLocale()
     let dur = String(format: "%.1f", Double(pcm.count) / 32000.0)
-    print("[voice] \(dur)s → \(locale)")
+    print("[voice] \(dur)s → Apple STT (\(locale))")
 
     let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("hv-\(ProcessInfo.processInfo.globallyUniqueString).wav")
     try? createWav(pcm).write(to: tmp)
 
     guard let rec = SFSpeechRecognizer(locale: Locale(identifier: locale)), rec.isAvailable else {
-        print("[voice] Recognizer unavailable for \(locale), falling back to en-US")
-        if let fallback = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), fallback.isAvailable {
-            recognize(fallback, tmp, completion)
-        } else {
-            try? FileManager.default.removeItem(at: tmp)
-            completion("")
-        }
-        return
+        try? FileManager.default.removeItem(at: tmp)
+        return completion("")
     }
-    recognize(rec, tmp, completion)
-}
-
-func recognize(_ rec: SFSpeechRecognizer, _ url: URL, _ completion: @escaping (String) -> Void) {
-    let req = SFSpeechURLRecognitionRequest(url: url)
+    let req = SFSpeechURLRecognitionRequest(url: tmp)
     req.shouldReportPartialResults = false
     if rec.supportsOnDeviceRecognition {
         req.requiresOnDeviceRecognition = true
-        print("[voice] Using on-device recognition")
-    } else {
-        print("[voice] Using cloud recognition (requires internet)")
+        print("[voice] On-device")
     }
-
     rec.recognitionTask(with: req) { result, _ in
-        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: tmp)
         let text = result?.isFinal == true ? result!.bestTranscription.formattedString : ""
         if !text.isEmpty { print("[voice] \"\(text)\"") }
         completion(text)
     }
 }
 
-// MARK: - WebSocket server
+// MARK: - WebSocket helpers
 
 func sendJSON(_ conn: NWConnection, _ dict: [String: String]) {
     guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return }
@@ -116,9 +134,75 @@ func sendJSON(_ conn: NWConnection, _ dict: [String: String]) {
     conn.send(content: data, contentContext: ctx, isComplete: true, completion: .idempotent)
 }
 
-class Session {
+// MARK: - Proxy session (native languages → Anthropic)
+
+class ProxySession {
+    let conn: NWConnection
+    var upstream: URLSessionWebSocketTask?
+
+    init(_ conn: NWConnection, lang: String, token: String) {
+        self.conn = conn
+        let params = "encoding=linear16&sample_rate=16000&channels=1&endpointing_ms=300&utterance_end_ms=1000&language=\(lang)"
+        let url = URL(string: "\(ANTHROPIC_WS)?\(params)")!
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("cli", forHTTPHeaderField: "x-app")
+        upstream = URLSession.shared.webSocketTask(with: request)
+        upstream?.resume()
+        receiveFromUpstream()
+        receiveFromClient()
+        print("[voice] Proxying to Anthropic (\(lang))")
+    }
+
+    // Client → Anthropic
+    func receiveFromClient() {
+        conn.receiveMessage { [weak self] data, ctx, _, error in
+            guard let self = self, let data = data, error == nil else { return }
+            let meta = ctx?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata
+            switch meta?.opcode {
+            case .text:
+                self.upstream?.send(.string(String(data: data, encoding: .utf8) ?? "")) { _ in }
+            case .binary:
+                self.upstream?.send(.data(data)) { _ in }
+            default: break
+            }
+            self.receiveFromClient()
+        }
+    }
+
+    // Anthropic → Client
+    func receiveFromUpstream() {
+        upstream?.receive { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let msg):
+                switch msg {
+                case .string(let text):
+                    let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+                    let ctx = NWConnection.ContentContext(identifier: "ws", metadata: [meta])
+                    self.conn.send(content: text.data(using: .utf8), contentContext: ctx, isComplete: true, completion: .idempotent)
+                case .data(let data):
+                    let meta = NWProtocolWebSocket.Metadata(opcode: .binary)
+                    let ctx = NWConnection.ContentContext(identifier: "ws", metadata: [meta])
+                    self.conn.send(content: data, contentContext: ctx, isComplete: true, completion: .idempotent)
+                @unknown default: break
+                }
+                self.receiveFromUpstream()
+            case .failure:
+                break
+            }
+        }
+    }
+}
+
+// MARK: - Local session (unsupported languages → Apple STT)
+
+class LocalSession {
     var chunks: [Data] = []
     var closed = false
+    let locale: String
+
+    init(locale: String) { self.locale = locale }
 
     func receive(_ conn: NWConnection) {
         conn.receiveMessage { [self] data, ctx, _, error in
@@ -142,13 +226,15 @@ class Session {
             sendJSON(conn, ["type": "TranscriptText", "data": ""])
             let pcm = chunks.reduce(Data()) { $0 + $1 }
             chunks = []
-            transcribe(pcm) { text in
+            transcribeApple(pcm, locale: locale) { text in
                 if !text.isEmpty { sendJSON(conn, ["type": "TranscriptText", "data": text]) }
                 sendJSON(conn, ["type": "TranscriptEndpoint"])
             }
         }
     }
 }
+
+// MARK: - Server
 
 func startServer() {
     let params = NWParameters.tcp
@@ -160,16 +246,26 @@ func startServer() {
         return
     }
     listener.newConnectionHandler = { conn in
-        print("[voice] Connected (\(currentLocale()))")
-        let session = Session()
         conn.start(queue: .main)
-        session.receive(conn)
+        let raw = readLanguage()
+        let code = langCode(raw)
+
+        if isNativeLanguage(raw), let token = readOAuthToken() {
+            print("[voice] Connected (\(code) → Anthropic)")
+            _ = ProxySession(conn, lang: code, token: token)
+        } else {
+            let locale = appleLocale(raw)
+            print("[voice] Connected (\(locale) → Apple STT)")
+            let session = LocalSession(locale: locale)
+            session.receive(conn)
+        }
     }
     listener.start(queue: .main)
-    print("[voice] Voice server on ws://127.0.0.1:\(PORT) (Apple STT)")
+    print("[voice] Voice server on ws://127.0.0.1:\(PORT)")
+    print("[voice] Native languages → Anthropic | Others → Apple STT")
 }
 
-// MARK: - App entry (needed for macOS TCC permission)
+// MARK: - App entry
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)

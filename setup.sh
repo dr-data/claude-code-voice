@@ -92,9 +92,7 @@ cat > "$PLIST" << EOF
 <plist version="1.0"><dict>
     <key>Label</key><string>com.hebrew-voice.server</string>
     <key>ProgramArguments</key><array>
-        <string>/usr/bin/open</string>
-        <string>-W</string>
-        <string>$APP</string>
+        <string>$APP/Contents/MacOS/hebrew-voice</string>
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
