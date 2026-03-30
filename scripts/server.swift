@@ -40,9 +40,9 @@ func currentLocale() -> String {
     let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json")
     guard let data = try? Data(contentsOf: path),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let lang = json["language"] as? String else { return "he-IL" }
+          let lang = json["language"] as? String else { return "en-US" }
     let key = lang.lowercased().trimmingCharacters(in: .whitespaces)
-    return localeMap[key] ?? (key.contains("-") ? key : "he-IL")
+    return localeMap[key] ?? (key.contains("-") ? key : "en-US")
 }
 
 // MARK: - WAV
@@ -76,8 +76,8 @@ func transcribe(_ pcm: Data, completion: @escaping (String) -> Void) {
     try? createWav(pcm).write(to: tmp)
 
     guard let rec = SFSpeechRecognizer(locale: Locale(identifier: locale)), rec.isAvailable else {
-        print("[voice] Recognizer unavailable for \(locale), falling back to he-IL")
-        if let fallback = SFSpeechRecognizer(locale: Locale(identifier: "he-IL")), fallback.isAvailable {
+        print("[voice] Recognizer unavailable for \(locale), falling back to en-US")
+        if let fallback = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), fallback.isAvailable {
             recognize(fallback, tmp, completion)
         } else {
             try? FileManager.default.removeItem(at: tmp)
